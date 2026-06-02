@@ -21,6 +21,7 @@ import sys
 import os
 import signal
 import time
+import fcntl
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -37,6 +38,7 @@ from PyObjCTools.AppHelper import runEventLoop
 
 _DIR = Path(__file__).parent
 _PID_FILE = _DIR / "cache" / "daemon.pid"
+_LOCK_FILE = _DIR / "cache" / "daemon.lock"
 
 _KC_M = 46            # kVK_ANSI_M
 _MOD_ALT = Quartz.kCGEventFlagMaskAlternate
@@ -75,7 +77,6 @@ def _callback(proxy, event_type, event, refcon):
 
 
 def _kill_existing() -> None:
-    _PID_FILE.parent.mkdir(exist_ok=True)
     if _PID_FILE.exists():
         try:
             old = int(_PID_FILE.read_text().strip())
@@ -90,11 +91,26 @@ def _kill_existing() -> None:
             pass
 
 
+def _claim_singleton() -> None:
+    """Take over as the single running daemon: kill any prior instance and
+    record our PID, serialized by an exclusive file lock so two simultaneous
+    starts can't both survive (BUG-10). The lock is held only for this
+    critical section, so a later start still sees our PID and replaces us."""
+    _PID_FILE.parent.mkdir(exist_ok=True)
+    lock_fd = os.open(str(_LOCK_FILE), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        _kill_existing()
+        _PID_FILE.write_text(str(os.getpid()))
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def main() -> None:
     global _overlay
 
-    _kill_existing()
-    _PID_FILE.write_text(str(os.getpid()))
+    _claim_singleton()
 
     import atexit
     atexit.register(
